@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# nolo-graphite.py: send metrics from nolo plugins to graphite
+
+import ConfigParser
+import StringIO
+import datetime
+import json
+import logging
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+class NoloMetricCollector:
+    '''
+    '''
+    def __init__(self, plugin, handler):
+        self.plugin = plugin
+        self.handler = handler
+
+    def run(self):
+        metrics = self.collect_metrics()
+        self.send_metrics(metrics)
+
+    def collect_metrics(self):
+        date = datetime.datetime.now()
+        hostname = socket.getfqdn().split('.')[0]
+
+        output = subprocess.check_output(["nolo-json", collector.plugin])
+        data = json.loads(output)
+
+        metrics = []
+        for plugin_name in data:
+            for metric in data[plugin_name]:
+                metrics.append(NoloMetric(hostname, date, plugin_name, metric['identifier'], metric['value']))
+        return metrics
+
+    def send_metrics(self, metrics):
+        s = self.handler(config)
+        s.connect()
+        for m in metrics:
+            s.send_metric(m)
+        s.close()
+
+
+class NoloMetric:
+    '''Value object for metrics
+    '''
+    def __init__(self, hostname, date, plugin, metric, value):
+       self.hostname = hostname.lower()
+       self.date = date
+       self.plugin = plugin
+       self.metric = metric
+       self.value = value
+
+    def __str__(self):
+        return "%s.%s %s hostname=%s date=%s" % (self.plugin, self.metric, self.value, self.hostname, self.date.strftime('%s'))
+
+class GraphiteHandler:
+    '''Metric Handler access to a graphite server
+    '''
+    def __init__(self, config):
+        '''load host, port and protocol from config
+        '''
+        self.host = config.get('graphite','host').strip()
+
+        try:
+            self.port = config.getint('graphite','port')
+        except ConfigParser.NoOptionError:
+            self.port = 2003
+
+        try:
+            self.protocol = config.get('graphite', 'protocol')
+        except ConfigParser.NoOptionError:
+            self.protocol = 'plaintext'
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+
+    def connect(self):
+        '''initialize connection to graphite carbon server
+        '''
+        self.sock.connect((self.host, self.port))
+
+    def send_metric(self, metric):
+        '''send a NoloMetric to the graphite carbon server
+        '''
+        self.sock.sendall(self.__format_metric(metric))
+
+    def close(self):
+        '''close connection to graphite carbon server
+        '''
+        self.sock.close()
+
+    def __str__(self):
+        return "%s:%s:%s" % (self.protocol, self.host, self.port)
+
+    def __format_metric(self, metric):
+        '''serialize NoloMetric as needed for the carbon plaintext protocol
+        '''
+        return "test.%s.%s.%s %s %s\n" % (metric.hostname, metric.plugin, metric.metric, metric.value, metric.date.strftime('%s'))
+
+# turn up logging if DEBUG environment variable is on
+if 'DEBUG' in os.environ:
+    logging.setLevel(logging.DEBUG)
+
+# ensure params are sane
+if 2 > len(sys.argv):
+    logging.critical("No plugin provided.")
+    sys.stderr.write("usage: %s plugin\n" % sys.argv[0])
+    sys.exit(-1)
+
+# ensure config is sane, load it
+config = ConfigParser.ConfigParser()
+config.read('/etc/nolo-graphite.conf')
+
+# grab plugin name from params
+plugin = sys.argv[1]
+
+collector = NoloMetricCollector(plugin, GraphiteHandler)
+collector.run()
